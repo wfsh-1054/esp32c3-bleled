@@ -1,0 +1,274 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ESP32-C3 BLE 控制面板</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            background-color: #f4f7f6;
+            color: #333;
+            margin: 0;
+            padding: 20px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+        .container {
+            max-width: 500px;
+            width: 100%;
+            background-color: #fff;
+            padding: 25px;
+            border-radius: 12px;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+        }
+        h2 {
+            text-align: center;
+            margin-top: 0;
+            color: #2c3e50;
+        }
+        .status-container {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 10px 15px;
+            background-color: #f8f9fa;
+            border-radius: 8px;
+            margin-bottom: 20px;
+            border: 1px solid #e9ecef;
+        }
+        .status-dot {
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            background-color: #dc3545;
+            display: inline-block;
+            margin-right: 8px;
+        }
+        .status-dot.connected {
+            background-color: #28a745;
+        }
+        .btn {
+            padding: 12px 20px;
+            font-size: 16px;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            transition: background-color 0.2s;
+            font-weight: bold;
+        }
+        .btn-connect {
+            background-color: #007bff;
+            color: white;
+            width: 100%;
+        }
+        .btn-connect:hover {
+            background-color: #0056b3;
+        }
+        .btn-disconnect {
+            background-color: #6c757d;
+            color: white;
+            width: 100%;
+        }
+        .btn-disconnect:hover {
+            background-color: #5a6268;
+        }
+        .control-grid {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 12px;
+            margin-top: 20px;
+        }
+        .btn-control {
+            color: white;
+            text-shadow: 1px 1px 2px rgba(0,0,0,0.2);
+            padding: 20px 10px;
+        }
+        .btn-red { background-color: #ea4335; }
+        .btn-red:hover { background-color: #d33225; }
+        .btn-green { background-color: #34a853; }
+        .btn-green:hover { background-color: #2b8c44; }
+        .btn-blue { background-color: #4285f4; }
+        .btn-blue:hover { background-color: #2a6ed0; }
+        
+        .btn-off {
+            grid-column: span 3;
+            background-color: #343a40;
+            color: white;
+            margin-top: 10px;
+        }
+        .btn-off:hover {
+            background-color: #23272b;
+        }
+        .btn:disabled {
+            background-color: #ced4da;
+            color: #6c757d;
+            cursor: not-allowed;
+        }
+        .log-container {
+            margin-top: 20px;
+        }
+        .log-title {
+            font-size: 14px;
+            color: #6c757d;
+            margin-bottom: 5px;
+        }
+        #logConsole {
+            width: 100%;
+            height: 120px;
+            background-color: #1e1e1e;
+            color: #39ff14;
+            font-family: monospace;
+            padding: 10px;
+            border-radius: 6px;
+            box-sizing: border-box;
+            resize: none;
+            font-size: 12px;
+        }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <h2>ESP32-C3 藍牙調光器</h2>
+    
+    <div class="status-container">
+        <span>連線狀態: <strong id="statusText">未連線</strong></span>
+        <div id="statusDot" class="status-dot"></div>
+    </div>
+
+    <button id="connectBtn" class="btn btn-connect" onclick="toggleConnection()">連接藍牙裝置</button>
+
+    <div class="control-grid">
+        <button id="btnR" class="btn btn-control btn-red" onclick="sendCommand('R')" disabled>紅色 +</button>
+        <button id="btnG" class="btn btn-control btn-green" onclick="sendCommand('G')" disabled>綠色 +</button>
+        <button id="btnB" class="btn btn-control btn-blue" onclick="sendCommand('B')" disabled>藍色 +</button>
+        <button id="btnOff" class="btn btn-off" onclick="sendCommand('O')" disabled>關閉 LED</button>
+    </div>
+
+    <div class="log-container">
+        <div class="log-title">系統日誌:</div>
+        <textarea id="logConsole" readonly></textarea>
+    </div>
+</div>
+
+<script>
+    // UUID 設定 (與 ESP32 C3 程式對應，網頁端使用小寫)
+    const SERVICE_UUID = "6e400001-b5a3-f393-e0a9-e50e24dcca9e";
+    const CHARACTERISTIC_UUID_RX = "6e400002-b5a3-f393-e0a9-e50e24dcca9e";
+
+    let bleDevice = null;
+    let rxCharacteristic = null;
+
+    // 輸出訊息至網頁日誌
+    function log(message) {
+        const consoleElem = document.getElementById('logConsole');
+        const time = new Date().toLocaleTimeString();
+        consoleElem.value += `[${time}] ${message}\n`;
+        consoleElem.scrollTop = consoleElem.scrollHeight;
+    }
+
+    // 更新網頁介面狀態
+    function updateUIState(connected) {
+        const statusText = document.getElementById('statusText');
+        const statusDot = document.getElementById('statusDot');
+        const connectBtn = document.getElementById('connectBtn');
+        const controls = ['btnR', 'btnG', 'btnB', 'btnOff'];
+
+        if (connected) {
+            statusText.textContent = "已連線";
+            statusDot.className = "status-dot connected";
+            connectBtn.textContent = "斷開藍牙連線";
+            connectBtn.className = "btn btn-disconnect";
+            controls.forEach(id => document.getElementById(id).disabled = false);
+        } else {
+            statusText.textContent = "未連線";
+            statusDot.className = "status-dot";
+            connectBtn.textContent = "連接藍牙裝置";
+            connectBtn.className = "btn btn-connect";
+            controls.forEach(id => document.getElementById(id).disabled = true);
+        }
+    }
+
+    // 連線/斷開連線切換
+    async function toggleConnection() {
+        if (bleDevice && bleDevice.gatt.connected) {
+            log("正在中斷連線...");
+            bleDevice.gatt.disconnect();
+        } else {
+            await connectBLE();
+        }
+    }
+
+    // 連接 BLE 設備
+    async function connectBLE() {
+        if (!navigator.bluetooth) {
+            log("此瀏覽器不支援 Web Bluetooth API。請使用 Chrome 或 Edge。");
+            alert("您的瀏覽器不支援此功能，請使用 Chrome 或是確保在 HTTPS 安全協定下運行。");
+            return;
+        }
+
+        try {
+            log("正在搜尋裝置 'C3-Dimmer-V2'...");
+            
+            // 透過 Service UUID 進行篩選，以相容各裝置
+            bleDevice = await navigator.bluetooth.requestDevice({
+                filters: [
+                    { services: [SERVICE_UUID] }
+                ]
+            });
+
+            log(`已選取裝置: ${bleDevice.name}`);
+            
+            // 監聽斷線事件
+            bleDevice.addEventListener('gattserverdisconnected', onDisconnected);
+
+            log("正在建立 GATT 連線...");
+            const server = await bleDevice.gatt.connect();
+
+            log("正在獲取服務...");
+            const service = await server.getPrimaryService(SERVICE_UUID);
+
+            log("正在獲取寫入特徵值...");
+            rxCharacteristic = await service.getCharacteristic(CHARACTERISTIC_UUID_RX);
+
+            log("連線建立成功！");
+            updateUIState(true);
+
+        } catch (error) {
+            log(`連線失敗: ${error.message}`);
+            updateUIState(false);
+        }
+    }
+
+    // 斷線事件處理
+    function onDisconnected(event) {
+        log("裝置已中斷連線");
+        rxCharacteristic = null;
+        updateUIState(false);
+    }
+
+    // 傳送指令到 ESP32
+    async function sendCommand(commandChar) {
+        if (!rxCharacteristic) {
+            log("錯誤: 尚未連線到設備");
+            return;
+        }
+
+        try {
+            // 將字串轉為 ArrayBuffer
+            const encoder = new TextEncoder();
+            const data = encoder.encode(commandChar);
+            
+            // 使用 writeValueWithoutResponse (寫入無回覆)，對應 ESP32 的 WRITE_NR
+            await rxCharacteristic.writeValueWithoutResponse(data);
+            log(`已傳送指令: '${commandChar}'`);
+        } catch (error) {
+            log(`傳送失敗: ${error.message}`);
+        }
+    }
+</script>
+
+</body>
+</html>
